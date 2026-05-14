@@ -1,63 +1,57 @@
 # Financial News ETL Pipeline
 
-A Python ETL pipeline that scrapes financial news headlines, scores sentiment, stores them in SQLite, and displays a live Streamlit dashboard.
+An automated system that extracts financial news, cleans and normalises data, scores sentiment, stores it in SQLite, and displays a monitoring dashboard.
 
 ## Run & Operate
 
-- **Dashboard**: `streamlit run app.py --server.port 5000`
-- **Run pipeline manually**: `python scripts/pipeline.py`
+- **Dashboard**: `streamlit run app/dashboard.py --server.port 5000`
+- **Run pipeline**: `python pipeline.py`
 - **Run individual steps**:
-  - `python scripts/extract.py` — scrape headlines only
-  - `python scripts/transform.py` — extract + transform
-  - `python scripts/load.py` — full ETL to SQLite
+  - `python scripts/extract.py`
+  - `python scripts/transform.py`
+  - `python scripts/load.py`
 
-## Stack
-
-- Python 3.x
-- **Scraping**: `requests` + `BeautifulSoup4` (lxml-xml parser) — RSS feeds
-- **Transform**: `pandas` + `TextBlob` (polarity sentiment scoring)
-- **Storage**: SQLite via `sqlite3` — file at `data/market_data.db`
-- **Dashboard**: `Streamlit` + `matplotlib`
-
-## Where things live
+## Project Structure
 
 ```
 scripts/
-  extract.py     — BeautifulSoup RSS scraper (Reuters, MarketWatch, Yahoo Finance)
-  transform.py   — Pandas dedup + TextBlob sentiment scoring
-  load.py        — SQLite read/write helpers
-  pipeline.py    — Orchestrates Extract → Transform → Load
+  extract.py      — BeautifulSoup RSS scraper (MarketWatch, Yahoo Finance, Reuters)
+  transform.py    — Pandas dedup + TextBlob sentiment scoring
+  load.py         — SQLAlchemy upsert into data/warehouse.db → market_analysis table
+app/
+  dashboard.py    — Streamlit dark-theme monitoring dashboard
+pipeline.py       — Main orchestrator (Extract → Transform → Load)
 data/
-  market_data.db — SQLite database (auto-created on first run)
-app.py           — Streamlit dashboard
+  warehouse.db    — SQLite database (auto-created on first run)
+logs/
+  pipeline.log    — Pipeline run log (success/error per run)
+cron_config.md    — Instructions for scheduling pipeline.py with cron
+requirements.txt  — Python dependencies
 .streamlit/
-  config.toml    — Server config (port 5000, headless)
+  config.toml     — Server config (port 5000) + dark theme
 ```
 
-## Architecture decisions
+## Stack
 
-- RSS feeds are parsed as XML with BeautifulSoup's `lxml-xml` parser — more reliable than scraping rendered HTML.
-- Duplicate detection runs at two levels: Pandas `drop_duplicates` during transform, and a same-day headline check on load to safely support repeated pipeline runs.
-- TextBlob polarity is applied to `headline + summary` concatenation for a richer sentiment signal than headline-only scoring.
-- The dashboard's "Run ETL Pipeline" button calls `pipeline.py` inline — no separate scheduler needed for demos.
+- **Scraping**: `requests` + `BeautifulSoup4` (lxml-xml parser on RSS feeds)
+- **Transform**: `pandas` + `TextBlob` (polarity −1.0 to +1.0)
+- **Storage**: SQLite via `SQLAlchemy` — `data/warehouse.db` → `market_analysis`
+- **Dashboard**: `Streamlit` + `matplotlib`
 
-## Product
+## Architecture Decisions
 
-- Scrapes financial headlines from MarketWatch and Yahoo Finance RSS feeds (Reuters as tertiary).
-- Cleans and deduplicates data, then scores each headline with a sentiment polarity (−1.0 to +1.0).
-- Stores everything in `data/market_data.db` → `news_logs` table with auto-incrementing ID.
-- Streamlit dashboard shows KPI metrics, a sentiment bar chart, a polarity histogram, and a filterable headlines table.
-
-## User preferences
-
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- RSS feeds parsed as XML — more reliable than scraping rendered HTML
+- UNIQUE constraint on `headline` + upsert logic prevents duplicates across repeated runs
+- TextBlob scored on `headline + summary` concatenation for richer signal
+- Logging writes to both stdout and `logs/pipeline.log` on every run
+- Dark professional theme configured via `.streamlit/config.toml`
 
 ## Gotchas
 
-- NLTK corpora (`punkt`, `averaged_perceptron_tagger`) must be downloaded before first TextBlob use — `transform.py` does this automatically on import.
-- Reuters RSS (`feeds.reuters.com`) may be blocked in the Replit sandbox — MarketWatch + Yahoo Finance are the reliable sources.
-- SQLite DB path is resolved relative to `scripts/load.py` location (`../data/market_data.db`) so it works from any CWD.
+- NLTK corpora are auto-downloaded on first `transform.py` import
+- Reuters RSS may be blocked in the sandbox — MarketWatch + Yahoo Finance are the reliable sources
+- DB path is resolved from `scripts/load.py` location so it works from any CWD
 
-## Pointers
+## User Preferences
 
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+_Populate as you build — explicit user instructions worth remembering across sessions._

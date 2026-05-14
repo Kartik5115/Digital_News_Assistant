@@ -1,0 +1,8 @@
+pandas
+beautifulsoup4
+textblob
+sqlalchemy
+streamlit
+requests
+lxml
+matplotlib

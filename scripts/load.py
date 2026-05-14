@@ -1,143 +1,107 @@
-"""
-Load: Append transformed news data into a SQLite database.
-Database : data/market_data.db
-Table    : news_logs
-"""
-
-import sqlite3
-import pandas as pd
 import logging
-import os
 from pathlib import Path
+from datetime import datetime
+
+import pandas as pd
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Float, DateTime,
+    UniqueConstraint, text
+)
+from sqlalchemy.orm import declarative_base, Session
 
 logger = logging.getLogger(__name__)
 
-DB_DIR = Path(__file__).resolve().parent.parent / "data"
-DB_PATH = DB_DIR / "market_data.db"
+DB_DIR  = Path(__file__).resolve().parent.parent / "data"
+DB_PATH = DB_DIR / "warehouse.db"
+DB_URL  = f"sqlite:///{DB_PATH}"
 
-CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS news_logs (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    headline        TEXT    NOT NULL,
-    sentiment_score REAL,
-    sentiment_label TEXT,
-    source          TEXT,
-    published_at    TEXT,
-    scraped_at      TEXT,
-    summary         TEXT,
-    url             TEXT,
-    inserted_at     TEXT    DEFAULT (datetime('now'))
-);
-"""
+Base = declarative_base()
 
 
-def _ensure_db() -> sqlite3.Connection:
-    """Create DB directory and table if they don't exist; return connection."""
+class MarketAnalysis(Base):
+    __tablename__ = "market_analysis"
+    __table_args__ = (UniqueConstraint("headline", name="uq_headline"),)
+
+    id              = Column(Integer, primary_key=True, autoincrement=True)
+    headline        = Column(String,  nullable=False)
+    sentiment_score = Column(Float)
+    sentiment_label = Column(String)
+    source          = Column(String)
+    published_at    = Column(String)
+    scraped_at      = Column(String)
+    summary         = Column(String)
+    url             = Column(String)
+    inserted_at     = Column(DateTime, default=datetime.utcnow)
+
+
+def _engine():
     DB_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute(CREATE_TABLE_SQL)
-    conn.commit()
-    return conn
+    engine = create_engine(DB_URL, echo=False)
+    Base.metadata.create_all(engine)
+    return engine
 
 
 def load(df: pd.DataFrame) -> int:
-    """
-    Append transformed rows into the news_logs table.
-    Skips rows whose headline already exists for today to avoid duplicates
-    across repeated pipeline runs.
-
-    Args:
-        df: Cleaned DataFrame from transform()
-
-    Returns:
-        Number of rows actually inserted.
-    """
     if df.empty:
-        logger.warning("Empty DataFrame — nothing to load.")
+        logger.warning("Empty DataFrame — nothing to load")
         return 0
 
-    conn = _ensure_db()
+    engine = _engine()
+    inserted = 0
 
-    # Fetch today's existing headlines to avoid re-inserting on repeated runs
-    existing = pd.read_sql_query(
-        "SELECT headline FROM news_logs WHERE date(inserted_at) = date('now')",
-        conn,
-    )
-    existing_set = set(existing["headline"].str.strip().tolist())
+    with Session(engine) as session:
+        for _, row in df.iterrows():
+            exists = session.execute(
+                text("SELECT 1 FROM market_analysis WHERE headline = :h"),
+                {"h": row["headline"]},
+            ).fetchone()
+            if exists:
+                continue
 
-    new_rows = df[~df["headline"].isin(existing_set)].copy()
+            session.add(MarketAnalysis(
+                headline        = row["headline"],
+                sentiment_score = row.get("sentiment_score"),
+                sentiment_label = row.get("sentiment_label"),
+                source          = row.get("source"),
+                published_at    = str(row.get("published_at", "")),
+                scraped_at      = str(row.get("scraped_at", "")),
+                summary         = row.get("summary", ""),
+                url             = row.get("url", ""),
+            ))
+            inserted += 1
 
-    if new_rows.empty:
-        logger.info("No new headlines to insert (all already in DB for today).")
-        conn.close()
-        return 0
+        session.commit()
 
-    # Convert datetime columns to ISO string for SQLite
-    for col in ["published_at", "scraped_at"]:
-        if col in new_rows.columns:
-            new_rows[col] = new_rows[col].astype(str)
-
-    new_rows.to_sql("news_logs", conn, if_exists="append", index=False)
-    conn.commit()
-    row_count = len(new_rows)
-    logger.info(f"Load complete: {row_count} rows inserted into news_logs ({DB_PATH})")
-    conn.close()
-    return row_count
-
-
-def fetch_today(limit: int = 500) -> pd.DataFrame:
-    """
-    Read today's news_logs rows from the database.
-
-    Args:
-        limit: Maximum rows to return.
-
-    Returns:
-        pd.DataFrame sorted by published_at descending.
-    """
-    if not DB_PATH.exists():
-        return pd.DataFrame()
-
-    conn = sqlite3.connect(str(DB_PATH))
-    df = pd.read_sql_query(
-        f"""
-        SELECT headline, sentiment_score, sentiment_label, source,
-               published_at, scraped_at, summary, url
-        FROM   news_logs
-        WHERE  date(inserted_at) = date('now')
-        ORDER  BY inserted_at DESC
-        LIMIT  {int(limit)}
-        """,
-        conn,
-    )
-    conn.close()
-    return df
+    logger.info(f"Load complete — {inserted} new rows inserted into market_analysis")
+    return inserted
 
 
 def fetch_all(limit: int = 1000) -> pd.DataFrame:
-    """Read all rows from news_logs (most recent first)."""
     if not DB_PATH.exists():
         return pd.DataFrame()
-
-    conn = sqlite3.connect(str(DB_PATH))
-    df = pd.read_sql_query(
-        f"""
-        SELECT headline, sentiment_score, sentiment_label, source,
-               published_at, scraped_at, summary, url, inserted_at
-        FROM   news_logs
-        ORDER  BY inserted_at DESC
-        LIMIT  {int(limit)}
-        """,
-        conn,
-    )
-    conn.close()
-    return df
+    engine = _engine()
+    with engine.connect() as conn:
+        return pd.read_sql(
+            text(f"SELECT * FROM market_analysis ORDER BY inserted_at DESC LIMIT {limit}"),
+            conn,
+        )
 
 
-if __name__ == "__main__":
-    from extract import extract
-    from transform import transform
-    raw = extract()
-    clean = transform(raw)
-    n = load(clean)
-    print(f"Inserted {n} rows. DB at: {DB_PATH}")
+def fetch_today() -> pd.DataFrame:
+    if not DB_PATH.exists():
+        return pd.DataFrame()
+    engine = _engine()
+    with engine.connect() as conn:
+        return pd.read_sql(
+            text("SELECT * FROM market_analysis WHERE date(inserted_at) = date('now') ORDER BY inserted_at DESC"),
+            conn,
+        )
+
+
+def total_records() -> int:
+    if not DB_PATH.exists():
+        return 0
+    engine = _engine()
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT COUNT(*) FROM market_analysis"))
+        return result.scalar() or 0
