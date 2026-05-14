@@ -1,154 +1,191 @@
 import sys
 from pathlib import Path
+from datetime import datetime, timedelta
+
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from load import fetch_all, total_records
 
-st.set_page_config(page_title="Market Intelligence", page_icon="📊", layout="wide")
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Market Sentiment Monitor",
+    page_icon="📈",
+    layout="wide",
+)
 
-# ── Run pipeline helper ───────────────────────────────────────────────────────
-def run_pipeline():
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def time_ago(dt) -> str:
+    if pd.isnull(dt):
+        return "—"
+    diff = datetime.utcnow() - pd.to_datetime(dt).to_pydatetime().replace(tzinfo=None)
+    s = int(diff.total_seconds())
+    if s < 60:
+        return f"{s} seconds ago"
+    if s < 3600:
+        return f"{s // 60} minutes ago"
+    if s < 86400:
+        return f"{s // 3600} hours ago"
+    return f"{s // 86400} days ago"
+
+
+def sentiment_label(score: float) -> str:
+    if score > 0.15:
+        return "Bullish 📈"
+    if score < -0.15:
+        return "Bearish 📉"
+    return "Neutral ➡️"
+
+
+def run_pipeline_inline():
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from pipeline import run
     return run()
 
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## ⚙️ Controls")
-    if st.button("▶  Run Pipeline", use_container_width=True):
-        with st.spinner("Running ETL…"):
+    st.markdown("## Controls")
+    if st.button("▶  Run Pipeline Now", use_container_width=True):
+        log_placeholder = st.empty()
+        with st.spinner("Running…"):
             try:
-                r = run_pipeline()
-                st.success(f"Done — {r['loaded']} new rows loaded")
+                result = run_pipeline_inline()
+                st.success(
+                    f"**Complete!**\n\n"
+                    f"- Scraped: **{result['extracted']}** headlines\n"
+                    f"- Processed: **{result['transformed']}** records\n"
+                    f"- Added: **{result['loaded']}** new | "
+                    f"Skipped: **{result['skipped']}** duplicates"
+                )
                 st.rerun()
             except Exception as e:
-                st.error(str(e))
+                st.error(f"Error: {e}")
 
     st.markdown("---")
-    keyword = st.text_input("🔍 Search headlines", placeholder="e.g. Fed, Apple, oil…")
-    show_all = st.checkbox("Show all history", value=False)
+    st.markdown("### 📋 Pipeline Log")
+    log_path = Path(__file__).resolve().parent.parent / "logs" / "pipeline.log"
+    if log_path.exists():
+        lines = log_path.read_text().strip().splitlines()
+        log_text = "\n".join(lines[-25:])
+        st.code(log_text, language=None)
+    else:
+        st.caption("No log yet — run the pipeline first.")
+
 
 # ── Load data ─────────────────────────────────────────────────────────────────
-df = fetch_all(limit=2000)
+df = fetch_all(limit=5000)
 
 if df.empty:
-    st.info("No data yet — click **Run Pipeline** in the sidebar.")
+    st.title("📈 Market Sentiment Monitor")
+    st.info("No data yet. Click **▶ Run Pipeline Now** in the sidebar to get started.")
     st.stop()
 
 df["inserted_at"] = pd.to_datetime(df["inserted_at"], errors="coerce")
 df["published_at"] = pd.to_datetime(df["published_at"], errors="coerce")
 
-# Apply keyword filter
-if keyword:
-    mask = df["headline"].str.contains(keyword, case=False, na=False)
-    filtered = df[mask]
-else:
-    filtered = df
+last_update_ts = df["inserted_at"].max()
+avg_score      = df["sentiment_score"].mean()
+total          = total_records()
 
-if not show_all:
-    today = datetime.utcnow().date()
-    filtered = filtered[filtered["inserted_at"].dt.date == today]
-
-# ── Header ────────────────────────────────────────────────────────────────────
-st.markdown("# 📊 Market Intelligence Dashboard")
-st.caption(f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+# ── Title ─────────────────────────────────────────────────────────────────────
+st.title("📈 Market Sentiment Monitor")
 st.markdown("---")
 
-# ── KPI cards ─────────────────────────────────────────────────────────────────
-total   = total_records()
-pos     = (filtered["sentiment_label"] == "Positive").sum()
-neg     = (filtered["sentiment_label"] == "Negative").sum()
-avg_pol = filtered["sentiment_score"].mean() if not filtered.empty else 0
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 1 — METRIC BAR
+# ─────────────────────────────────────────────────────────────────────────────
+c1, c2, c3 = st.columns(3)
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total Records Processed", f"{total:,}")
-c2.metric("Positive 🟢", int(pos))
-c3.metric("Negative 🔴", int(neg))
-c4.metric("Avg Polarity", f"{avg_pol:+.3f}")
+c1.metric(
+    label="Total Articles Scraped",
+    value=f"{total:,}",
+)
+
+c2.metric(
+    label="Average Market Sentiment",
+    value=f"{avg_score:+.2f}",
+    delta=sentiment_label(avg_score),
+)
+
+c3.metric(
+    label="Last Update",
+    value=time_ago(last_update_ts),
+)
 
 st.markdown("---")
 
-# ── Daily Sentiment Trend ─────────────────────────────────────────────────────
-st.subheader("Daily Sentiment Trend")
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 2 — 7-DAY SENTIMENT TREND
+# ─────────────────────────────────────────────────────────────────────────────
+st.subheader("Sentiment Trend — Last 7 Days")
 
-trend = (
-    df.dropna(subset=["inserted_at"])
-    .assign(date=df["inserted_at"].dt.date)
-    .groupby("date")["sentiment_score"]
-    .mean()
+cutoff = datetime.utcnow() - timedelta(days=7)
+trend_df = df[df["inserted_at"] >= cutoff].copy()
+trend_df["date"] = trend_df["inserted_at"].dt.date
+
+daily = (
+    trend_df.groupby("date")
+    .agg(avg_sentiment=("sentiment_score", "mean"), count=("headline", "count"))
     .reset_index()
     .sort_values("date")
 )
 
-if len(trend) >= 1:
-    fig, ax = plt.subplots(figsize=(10, 3))
-    fig.patch.set_facecolor("#0e1117")
-    ax.set_facecolor("#0e1117")
+fig, ax = plt.subplots(figsize=(11, 3.2))
+fig.patch.set_facecolor("#0e1117")
+ax.set_facecolor("#0e1117")
 
-    ax.plot(
-        trend["date"], trend["sentiment_score"],
-        color="#00d4aa", linewidth=2.5, marker="o", markersize=6, markerfacecolor="#ffffff"
+if len(daily) > 0:
+    dates  = daily["date"].tolist()
+    scores = daily["avg_sentiment"].tolist()
+
+    ax.plot(dates, scores, color="#00d4aa", linewidth=2.5,
+            marker="o", markersize=7, markerfacecolor="#ffffff", zorder=3)
+    ax.fill_between(dates, scores, 0,
+                    where=[s >= 0 for s in scores], alpha=0.18, color="#00d4aa")
+    ax.fill_between(dates, scores, 0,
+                    where=[s < 0  for s in scores], alpha=0.18, color="#ff4b4b")
+
+    # Annotate each point
+    for d, s in zip(dates, scores):
+        ax.annotate(f"{s:+.2f}", (d, s),
+                    textcoords="offset points", xytext=(0, 10),
+                    color="#e0e0e0", fontsize=8, ha="center")
+
+ax.axhline(0, color="#444", linewidth=1, linestyle="--")
+ax.set_ylim(-1, 1)
+ax.set_ylabel("Avg Sentiment", color="#aaaaaa", fontsize=10)
+ax.tick_params(colors="#aaaaaa", labelsize=9)
+for spine in ax.spines.values():
+    spine.set_edgecolor("#333")
+if len(daily) == 1:
+    ax.set_title(
+        "Only 1 day of data so far — run the pipeline daily to build a trend.",
+        color="#888", fontsize=9, loc="left"
     )
-    ax.axhline(0, color="#444", linewidth=1, linestyle="--")
-    ax.fill_between(trend["date"], trend["sentiment_score"], 0,
-                    where=(trend["sentiment_score"] >= 0),
-                    alpha=0.15, color="#00d4aa")
-    ax.fill_between(trend["date"], trend["sentiment_score"], 0,
-                    where=(trend["sentiment_score"] < 0),
-                    alpha=0.15, color="#ff4b4b")
-
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
-    ax.tick_params(colors="#aaaaaa", labelsize=9)
-    for spine in ax.spines.values():
-        spine.set_edgecolor("#333")
-    ax.set_ylabel("Avg Polarity", color="#aaaaaa", fontsize=10)
-    ax.set_ylim(-1, 1)
-    plt.tight_layout()
-    st.pyplot(fig)
-else:
-    st.info("Not enough data for a trend yet — run the pipeline a few times.")
+plt.tight_layout()
+st.pyplot(fig)
 
 st.markdown("---")
 
-# ── Sentiment distribution ────────────────────────────────────────────────────
-st.subheader("Sentiment Distribution")
-if not filtered.empty:
-    counts = (
-        filtered["sentiment_label"]
-        .value_counts()
-        .reindex(["Positive", "Neutral", "Negative"], fill_value=0)
-    )
-    fig2, ax2 = plt.subplots(figsize=(5, 2.5))
-    fig2.patch.set_facecolor("#0e1117")
-    ax2.set_facecolor("#0e1117")
-    colors = ["#00d4aa", "#888888", "#ff4b4b"]
-    bars = ax2.bar(counts.index, counts.values, color=colors, width=0.5)
-    for bar, v in zip(bars, counts.values):
-        ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.2,
-                 str(v), ha="center", fontsize=11, color="#ffffff", fontweight="bold")
-    ax2.tick_params(colors="#aaaaaa")
-    for spine in ax2.spines.values():
-        spine.set_edgecolor("#333")
-    ax2.set_facecolor("#0e1117")
-    plt.tight_layout()
-    st.pyplot(fig2)
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 3 — DATA EXPLORER
+# ─────────────────────────────────────────────────────────────────────────────
+st.subheader("Data Explorer")
 
-st.markdown("---")
+keyword = st.text_input("🔍 Search by keyword", placeholder='e.g. "Apple", "Fed", "oil"…')
 
-# ── Headlines table ───────────────────────────────────────────────────────────
-st.subheader(f"Headlines {'(filtered)' if keyword else ''}")
+display = df.copy()
+if keyword.strip():
+    display = display[display["headline"].str.contains(keyword.strip(), case=False, na=False)]
 
-if filtered.empty:
-    st.warning("No headlines match your search.")
-else:
-    cols = ["headline", "sentiment_score", "sentiment_label", "source", "published_at"]
-    available = [c for c in cols if c in filtered.columns]
-    display = filtered[available].copy()
-    display["sentiment_score"] = display["sentiment_score"].map(lambda x: f"{x:+.3f}")
-    st.dataframe(display, use_container_width=True, height=380)
-    st.caption(f"{len(filtered)} headlines shown")
+table = display[["headline", "source", "sentiment_label", "sentiment_score", "published_at"]].copy()
+table.columns = ["Headline", "Source", "Sentiment", "Score", "Published"]
+table["Score"] = table["Score"].map(lambda x: f"{x:+.3f}")
+table["Published"] = pd.to_datetime(table["Published"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+
+st.dataframe(table.reset_index(drop=True), use_container_width=True, height=400)
+st.caption(f"Showing {len(table):,} of {total:,} total records")

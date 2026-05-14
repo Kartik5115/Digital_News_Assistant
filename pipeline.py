@@ -1,7 +1,7 @@
 """
 pipeline.py — Main ETL orchestrator.
 Run with: python pipeline.py
-Logs to:  logs/pipeline.log
+Logs to:  logs/pipeline.log  +  stdout
 """
 
 import logging
@@ -13,17 +13,21 @@ from datetime import datetime
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_DIR / "pipeline.log"),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
+_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+
+_file_h   = logging.FileHandler(LOG_DIR / "pipeline.log")
+_stream_h = logging.StreamHandler(sys.stdout)
+for h in (_file_h, _stream_h):
+    h.setFormatter(_fmt)
+
+root = logging.getLogger()
+root.setLevel(logging.INFO)
+root.addHandler(_file_h)
+root.addHandler(_stream_h)
+
 logger = logging.getLogger("pipeline")
 
-# ── Add scripts/ to path ──────────────────────────────────────────────────────
+# ── Path setup ────────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent / "scripts"))
 
 from extract import extract
@@ -33,28 +37,33 @@ from load import load
 
 def run() -> dict:
     start = datetime.utcnow()
-    logger.info("=" * 50)
-    logger.info("Pipeline started")
-    logger.info("=" * 50)
 
-    try:
-        logger.info("EXTRACT")
-        raw = extract()
+    logger.info("=" * 55)
+    logger.info("  Financial News ETL Pipeline — starting")
+    logger.info("=" * 55)
 
-        logger.info("TRANSFORM")
-        clean = transform(raw)
+    # ── STEP 1: EXTRACT ───────────────────────────────────────────────────────
+    logger.info("Step 1/3 — Scraping financial news sources...")
+    raw = extract()
+    logger.info(f"  ✔  {len(raw)} headlines collected from RSS feeds.")
 
-        logger.info("LOAD")
-        n = load(clean)
+    # ── STEP 2: TRANSFORM ─────────────────────────────────────────────────────
+    logger.info("Step 2/3 — Cleaning data and calculating sentiment...")
+    clean = transform(raw)
+    logger.info(f"  ✔  Sentiment analysis complete — {len(clean)} records processed (100%).")
 
-        elapsed = (datetime.utcnow() - start).seconds
-        result = {"extracted": len(raw), "transformed": len(clean), "loaded": n, "elapsed_s": elapsed}
-        logger.info(f"Pipeline SUCCESS — {result}")
-        return result
+    # ── STEP 3: LOAD ──────────────────────────────────────────────────────────
+    logger.info("Step 3/3 — Loading into SQLite database...")
+    inserted = load(clean)
+    skipped  = len(clean) - inserted
+    logger.info(f"  ✔  {inserted} unique records added, {skipped} duplicates ignored.")
 
-    except Exception as exc:
-        logger.error(f"Pipeline FAILED: {exc}", exc_info=True)
-        raise
+    elapsed = (datetime.utcnow() - start).seconds
+    logger.info("=" * 55)
+    logger.info(f"  Pipeline finished in {elapsed}s")
+    logger.info("=" * 55)
+
+    return {"extracted": len(raw), "transformed": len(clean), "loaded": inserted, "skipped": skipped}
 
 
 if __name__ == "__main__":
